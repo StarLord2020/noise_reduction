@@ -1,0 +1,341 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+  <meta charset="UTF-8" />
+  <title>Подавление шума</title>
+  <style>
+    :root {
+      --primary: #007acc;
+      --primary-dark: #005fa3;
+      --danger: #cc0000;
+      --muted: #999;
+      --background: #f4f6f8;
+      --card-bg: #fff;
+      --text-color: #333;
+      --border-radius: 12px;
+    }
+
+    body {
+      font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+      background-color: var(--background);
+      color: var(--text-color);
+      margin: 0;
+      padding: 1.5rem;
+      display: flex;
+      justify-content: center;
+    }
+
+    .container {
+      max-width: 800px;
+      width: 100%;
+      background: var(--card-bg);
+      padding: 1.5rem;
+      padding-top: 0;
+      border-radius: var(--border-radius);
+      box-shadow: 0 4px 12px rgba(0, 0, 0, 0.1);
+    }
+
+    h1 {
+      text-align: center;
+      margin-bottom: 1.5rem;
+    }
+
+    fieldset {
+      border: 1px solid #ddd;
+      border-radius: var(--border-radius);
+      padding: 1rem;
+      margin-bottom: 1.5rem;
+    }
+
+    legend {
+      font-weight: bold;
+    }
+
+    label {
+      display: block;
+      margin: 0.4rem 0;
+      cursor: pointer;
+    }
+
+    button {
+      margin: 0.5rem 0.5rem 0.5rem 0;
+      padding: 0.6rem 1.2rem;
+      font-size: 1rem;
+      cursor: pointer;
+      border: none;
+      border-radius: var(--border-radius);
+      background-color: var(--primary);
+      color: white;
+      transition: background-color 0.2s, transform 0.1s;
+    }
+
+    button:hover:not(:disabled) {
+      background-color: var(--primary-dark);
+      transform: translateY(-1px);
+    }
+
+    button:disabled {
+      background-color: #ccc;
+      cursor: not-allowed;
+    }
+
+    #stop-record-button {
+      background-color: var(--danger);
+    }
+
+    #stop-stream-button {
+      background-color: var(--muted);
+      color: white;
+    }
+
+    #download-link {
+      display: inline-block;
+      margin-top: 1rem;
+      text-decoration: none;
+      font-weight: bold;
+      color: green;
+    }
+
+    #progress {
+      margin-top: 1rem;
+      font-weight: bold;
+    }
+
+    canvas {
+      width: 100%;
+      height: 90px;
+      background: #3b2f2f;
+      border-radius: var(--border-radius);
+    }
+
+    form {
+        min-height: 375px;
+    }
+
+    @media (max-width: 600px) {
+      .container {
+        padding: 1rem;
+      }
+
+      button {
+        width: 100%;
+        margin-bottom: 0.5rem;
+      }
+    }
+  </style>
+</head>
+<body>
+  <div class="container">
+    <h1>Пример подавления шума</h1>
+    <form id="form">
+      <fieldset>
+        <legend>Выберите тип подавления:</legend>
+        <label><input type="radio" name="type" value="none" checked> Без подавления</label>
+        <label><input type="radio" name="type" value="speex"> Speex</label>
+        <label><input type="radio" name="type" value="rnnoise"> RNNoise</label>
+        <label><input type="radio" name="type" value="noiseGate"> Noise Gate</label>
+      </fieldset>
+
+      <fieldset>
+        <legend>WebRTC опции:</legend>
+        <label><input type="checkbox" name="webrtc-noise"> Подавление шума</label>
+        <label><input type="checkbox" name="webrtc-echo"> Эхо-подавление</label>
+      </fieldset>
+
+      <button type="button" id="start-button">Начать прослушивание</button>
+      <button type="button" id="stop-stream-button" style="display: none;">Остановить прослушивание</button>
+      <button type="button" id="record-button" style="display: none;">Начать запись</button>
+      <button type="button" id="stop-record-button" style="display: none;">Остановить запись</button>
+      <a id="download-link" style="display:none;" download="recorded.webm">Скачать запись</a>
+    </form>
+
+    <div id="progress"></div>
+    <canvas id="canvas"></canvas>
+    <iframe 
+        src="https://shared.druid.1t.ru/1461/2911273601574569961" 
+        frameborder="0"
+        style="width: 100%; height: 540px; margin-top: 10px;"
+    ></iframe>
+  </div>
+
+  <script type="module">
+    import {
+      loadSpeex,
+      SpeexWorkletNode,
+      loadRnnoise,
+      RnnoiseWorkletNode,
+      NoiseGateWorkletNode
+    } from './web-noise-suppressor/dist/index.js';
+    import { setupVisualizer } from './visualizer.js';
+
+    let ctx;
+    let source, gain, speex, rnnoise, noiseGate, analyzer;
+    let mediaRecorder, recordedChunks = [], recordStartTime, recordTimer;
+    let stream;
+
+    const form = document.getElementById('form');
+    const canvas = document.getElementById('canvas');
+    const button = document.getElementById('start-button');
+    const stopStreamBtn = document.getElementById('stop-stream-button');
+    const recordBtn = document.getElementById('record-button');
+    const stopRecordBtn = document.getElementById('stop-record-button');
+    const downloadLink = document.getElementById('download-link');
+    const progress = document.getElementById('progress');
+    let audioStatus = false;
+
+    async function initAudio() {
+      button.disabled = true;
+      button.style.display = 'none';
+
+      if (ctx) {
+        await ctx.close();
+      }
+
+      ctx = new (window.AudioContext || window.webkitAudioContext)();
+
+      const speexWasm = await loadSpeex({ url: '/speex.wasm' });
+      const rnnoiseWasm = await loadRnnoise({
+        url: '/rnnoise.wasm',
+        simdUrl: '/rnnoise_simd.wasm'
+      });
+
+      await ctx.audioWorklet.addModule('./web-noise-suppressor/dist/speex/workletProcessor.js');
+      await ctx.audioWorklet.addModule('./web-noise-suppressor/dist/noiseGate/workletProcessor.js');
+      await ctx.audioWorklet.addModule('./web-noise-suppressor/dist/rnnoise/workletProcessor.js');
+
+      const formData = new FormData(form);
+      const type = formData.get('type');
+      const enableVisualizer = true;
+      const webRtcNoiseSuppression = formData.has('webrtc-noise');
+      const webRtcEchoCancellation = formData.has('webrtc-echo');
+
+      if (stream) {
+        stream.getTracks().forEach(track => track.stop());
+      }
+
+      stream = await navigator.mediaDevices.getUserMedia({
+        audio: {
+          noiseSuppression: webRtcNoiseSuppression,
+          echoCancellation: webRtcEchoCancellation,
+          autoGainControl: false
+        }
+      });
+
+      source?.disconnect();
+      speex?.disconnect();
+      rnnoise?.disconnect();
+      noiseGate?.disconnect();
+      gain?.disconnect();
+
+      source = ctx.createMediaStreamSource(stream);
+      gain = new GainNode(ctx);
+
+      if (type === 'speex') {
+        speex = new SpeexWorkletNode(ctx, { wasmBinary: speexWasm, maxChannels: 2 });
+        source.connect(speex);
+        speex.connect(gain);
+      } else if (type === 'rnnoise') {
+        rnnoise = new RnnoiseWorkletNode(ctx, { wasmBinary: rnnoiseWasm, maxChannels: 2 });
+        source.connect(rnnoise);
+        rnnoise.connect(gain);
+      } else if (type === 'noiseGate') {
+        noiseGate = new NoiseGateWorkletNode(ctx, {
+          openThreshold: -50,
+          closeThreshold: -60,
+          holdMs: 90,
+          maxChannels: 2
+        });
+        source.connect(noiseGate);
+        noiseGate.connect(gain);
+      } else {
+        source.connect(gain);
+      }
+
+      const dest = ctx.createMediaStreamDestination();
+      gain.connect(dest);
+
+      if (enableVisualizer) {
+        analyzer = setupVisualizer(canvas, ctx);
+        gain.connect(analyzer);
+        analyzer.connect(ctx.destination);
+      } else {
+        gain.connect(ctx.destination);
+      }
+
+      mediaRecorder = new MediaRecorder(dest.stream);
+      recordedChunks = [];
+      mediaRecorder.ondataavailable = e => {
+        if (e.data.size > 0) recordedChunks.push(e.data);
+      };
+      mediaRecorder.onstop = () => {
+        const blob = new Blob(recordedChunks, { type: 'audio/webm' });
+        if (blob.size > 0) {
+          downloadLink.href = URL.createObjectURL(blob);
+          downloadLink.style.display = 'inline';
+          downloadLink.textContent = 'Скачать запись';
+        }
+        clearInterval(recordTimer);
+        progress.textContent = '';
+        recordBtn.style.display = audioStatus ? 'inline' : 'none';
+        stopRecordBtn.style.display = 'none';
+      };
+
+      stopStreamBtn.style.display = 'inline';
+      recordBtn.style.display = 'inline';
+      button.disabled = false;
+    }
+
+    button.addEventListener('click', async (e) => {
+      e.preventDefault();
+      await initAudio();
+      audioStatus = true;
+    });
+
+    recordBtn.addEventListener('click', () => {
+      if (!mediaRecorder || mediaRecorder.state === 'recording') return;
+      recordedChunks = [];
+      recordStartTime = Date.now();
+      mediaRecorder.start();
+      progress.textContent = 'Запись: 0 сек';
+      recordBtn.style.display = 'none';
+      stopRecordBtn.style.display = 'inline';
+      recordTimer = setInterval(() => {
+        const seconds = Math.floor((Date.now() - recordStartTime) / 1000);
+        progress.textContent = `Запись: ${seconds} сек`;
+      }, 1000);
+    });
+
+    stopRecordBtn.addEventListener('click', () => {
+      if (mediaRecorder && mediaRecorder.state === 'recording') {
+        mediaRecorder.stop();
+      }
+    });
+
+    stopStreamBtn.addEventListener('click', () => {
+      audioStatus = false;
+      if (mediaRecorder && mediaRecorder.state === 'recording') {
+        mediaRecorder.stop();
+      }
+      if (stream) {
+        stream.getTracks().forEach(track => track.stop());
+      }
+      stopStreamBtn.style.display = 'none';
+      recordBtn.style.display = 'none';
+      stopRecordBtn.style.display = 'none';
+      downloadLink.style.display = 'none';
+      progress.textContent = '';
+      button.disabled = false;
+      button.style.display = 'inline';
+    });
+
+    const autoSwitchInputs = form.querySelectorAll('input[name="type"], input[name="webrtc-noise"], input[name="webrtc-echo"]');
+    autoSwitchInputs.forEach(input => {
+      input.addEventListener('change', async () => {
+        if (audioStatus) {
+          await initAudio();
+        }
+      });
+    });
+  </script>
+</body>
+</html>
