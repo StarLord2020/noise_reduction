@@ -128,6 +128,10 @@
   <div class="container">
     <h1>Пример подавления шума</h1>
     <form id="form">
+    <fieldset>
+        <legend>Выберите микрофон:</legend>
+        <select id="microphone-select"></select>
+    </fieldset>
       <fieldset>
         <legend>Выберите тип подавления:</legend>
         <label><input type="radio" name="type" value="none" checked> Без подавления</label>
@@ -168,10 +172,26 @@
     } from './web-noise-suppressor/dist/index.js';
     import { setupVisualizer } from './visualizer.js';
 
+    const micSelect = document.getElementById('microphone-select');
+    let selectedDeviceId = null;
+
     let ctx;
     let source, gain, speex, rnnoise, noiseGate, analyzer;
     let mediaRecorder, recordedChunks = [], recordStartTime, recordTimer;
     let stream;
+
+    async function populateMicrophones() {
+        const devices = await navigator.mediaDevices.enumerateDevices();
+        const audioInputs = devices.filter(d => d.kind === 'audioinput');
+        micSelect.innerHTML = '';
+        audioInputs.forEach(device => {
+            const option = document.createElement('option');
+            option.value = device.deviceId;
+            option.text = device.label || `Микрофон ${micSelect.length + 1}`;
+            micSelect.appendChild(option);
+        });
+    }
+    populateMicrophones();
 
     const form = document.getElementById('form');
     const canvas = document.getElementById('canvas');
@@ -182,6 +202,11 @@
     const downloadLink = document.getElementById('download-link');
     const progress = document.getElementById('progress');
     let audioStatus = false;
+
+    micSelect.addEventListener('change', () => {
+        selectedDeviceId = micSelect.value;
+        if (audioStatus) initAudio();
+    });
 
     async function initAudio() {
       button.disabled = true;
@@ -215,6 +240,7 @@
 
       stream = await navigator.mediaDevices.getUserMedia({
         audio: {
+            deviceId: selectedDeviceId ? { exact: selectedDeviceId } : undefined,
           noiseSuppression: webRtcNoiseSuppression,
           echoCancellation: webRtcEchoCancellation,
           autoGainControl: false
